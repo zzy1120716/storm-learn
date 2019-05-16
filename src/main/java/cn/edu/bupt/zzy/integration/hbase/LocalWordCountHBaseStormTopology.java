@@ -1,13 +1,9 @@
-package cn.edu.bupt.zzy.integration.jdbc;
+package cn.edu.bupt.zzy.integration.hbase;
 
-import com.google.common.collect.Maps;
 import org.apache.storm.Config;
 import org.apache.storm.LocalCluster;
-import org.apache.storm.jdbc.bolt.JdbcInsertBolt;
-import org.apache.storm.jdbc.common.ConnectionProvider;
-import org.apache.storm.jdbc.common.HikariCPConnectionProvider;
-import org.apache.storm.jdbc.mapper.JdbcMapper;
-import org.apache.storm.jdbc.mapper.SimpleJdbcMapper;
+import org.apache.storm.hbase.bolt.HBaseBolt;
+import org.apache.storm.hbase.bolt.mapper.SimpleHBaseMapper;
 import org.apache.storm.spout.SpoutOutputCollector;
 import org.apache.storm.task.OutputCollector;
 import org.apache.storm.task.TopologyContext;
@@ -25,11 +21,11 @@ import java.util.Map;
 import java.util.Random;
 
 /**
- * @description: Storm整合JDBC
+ * @description: Storm整合HBase
  * @author: zzy
  * @date: 2019-05-09 20:30
  **/
-public class LocalWordCountJDBCStormTopology {
+public class LocalWordCountHBaseStormTopology {
 
     /**
      * 第一步：读取文件，产生数据是一行行的文本
@@ -126,13 +122,21 @@ public class LocalWordCountJDBCStormTopology {
         }
 
         public void declareOutputFields(OutputFieldsDeclarer declarer) {
-            declarer.declare(new Fields("word", "word_count"));
+            declarer.declare(new Fields("word", "count"));
         }
     }
 
 
-
     public static void main(String[] args) {
+
+        Config config = new Config();
+
+        Map<String, Object> hbaseConf = new HashMap<String, Object>();
+        // hbase-site.xml中的配置参数
+        hbaseConf.put("hbase.rootdir", "hdfs://hadoop000:8020/hbase");
+        hbaseConf.put("hbase.zookeeper.quorum", "hadoop000:2181");
+
+        config.put("hbase.conf", hbaseConf);
 
         // 通过TopologyBuilder根据Spout和Bolt构建Topology
         TopologyBuilder builder = new TopologyBuilder();
@@ -140,32 +144,20 @@ public class LocalWordCountJDBCStormTopology {
         builder.setBolt("SplitBolt", new SplitBolt()).shuffleGrouping("DataSourceSpout");
         builder.setBolt("CountBolt", new CountBolt()).shuffleGrouping("SplitBolt");
 
-        // JdbcInsertBolt的相关配置
-        Map<String, Object> hikariConfigMap = Maps.newHashMap();
-//        hikariConfigMap.put("dataSourceClassName", "com.mysql.jdbc.jdbc2.optional.MysqlDataSource");
-        hikariConfigMap.put("dataSourceClassName", "com.mysql.cj.jdbc.MysqlDataSource");
-        hikariConfigMap.put("dataSource.url", "jdbc:mysql://localhost/storm?useUnicode=true&useSSL=false&characterEncoding=UTF-8&serverTimezone=UTC");
-        hikariConfigMap.put("dataSource.user", "root");
-        hikariConfigMap.put("dataSource.password", "1q2w3e4r");
-        ConnectionProvider connectionProvider = new HikariCPConnectionProvider(hikariConfigMap);
 
-        String tableName = "wc";
-        JdbcMapper simpleJdbcMapper = new SimpleJdbcMapper(tableName, connectionProvider);
+        SimpleHBaseMapper mapper = new SimpleHBaseMapper()
+                .withRowKeyField("word")
+                .withColumnFields(new Fields("word"))
+                .withCounterFields(new Fields("count"))
+                .withColumnFamily("cf");
 
-        JdbcInsertBolt userPersistanceBolt = new JdbcInsertBolt(connectionProvider, simpleJdbcMapper)
-                .withTableName(tableName)
-                .withQueryTimeoutSecs(30);
-
-        /*JdbcInsertBolt userPersistanceBolt = new JdbcInsertBolt(connectionProvider, simpleJdbcMapper)
-                .withInsertQuery("insert into wc values (?,?)")
-                .withQueryTimeoutSecs(30);*/
-
-        builder.setBolt("JdbcInsertBolt", userPersistanceBolt).shuffleGrouping("CountBolt");
-
+        HBaseBolt hbaseBolt = new HBaseBolt("wc", mapper)
+                .withConfigKey("hbase.conf");
+        builder.setBolt("HBaseBolt", hbaseBolt).shuffleGrouping("CountBolt");
 
         // 创建本地集群
         LocalCluster cluster = new LocalCluster();
-        cluster.submitTopology("LocalWordCountJDBCStormTopology", new Config(), builder.createTopology());
+        cluster.submitTopology("LocalWordCountHBaseStormTopology", config, builder.createTopology());
 
     }
 

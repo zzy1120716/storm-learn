@@ -3,11 +3,10 @@ package cn.edu.bupt.zzy.integration.jdbc;
 import com.google.common.collect.Maps;
 import org.apache.storm.Config;
 import org.apache.storm.LocalCluster;
-import org.apache.storm.jdbc.bolt.JdbcInsertBolt;
+import org.apache.storm.jdbc.common.Column;
 import org.apache.storm.jdbc.common.ConnectionProvider;
 import org.apache.storm.jdbc.common.HikariCPConnectionProvider;
-import org.apache.storm.jdbc.mapper.JdbcMapper;
-import org.apache.storm.jdbc.mapper.SimpleJdbcMapper;
+import org.apache.storm.jdbc.common.JdbcClient;
 import org.apache.storm.spout.SpoutOutputCollector;
 import org.apache.storm.task.OutputCollector;
 import org.apache.storm.task.TopologyContext;
@@ -20,16 +19,15 @@ import org.apache.storm.tuple.Tuple;
 import org.apache.storm.tuple.Values;
 import org.apache.storm.utils.Utils;
 
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Random;
+import java.sql.Types;
+import java.util.*;
 
 /**
- * @description: Storm整合JDBC
+ * @description: Storm整合JDBC改进，先查记录是否已存在，若存在，则update，否则，insert。
  * @author: zzy
  * @date: 2019-05-09 20:30
  **/
-public class LocalWordCountJDBCStormTopology {
+public class LocalWordCountJDBCUpdateStormTopology {
 
     /**
      * 第一步：读取文件，产生数据是一行行的文本
@@ -131,6 +129,67 @@ public class LocalWordCountJDBCStormTopology {
     }
 
 
+    /**
+     * 第四步：查询MySQL中是否已有相应记录，若有，则update，否则，insert
+     */
+    public static class JdbcUpdateBolt extends BaseRichBolt {
+
+        private OutputCollector collector;
+        private JdbcClient jdbcClient;
+        private ConnectionProvider connectionProvider;
+
+        public void prepare(Map stormConf, TopologyContext context, OutputCollector collector) {
+
+            this.collector = collector;
+
+            // JdbcInsertBolt的相关配置
+            Map<String, Object> hikariConfigMap = Maps.newHashMap();
+//        hikariConfigMap.put("dataSourceClassName", "com.mysql.jdbc.jdbc2.optional.MysqlDataSource");
+            hikariConfigMap.put("dataSourceClassName", "com.mysql.cj.jdbc.MysqlDataSource");
+            hikariConfigMap.put("dataSource.url", "jdbc:mysql://localhost/storm?useUnicode=true&useSSL=false&characterEncoding=UTF-8&serverTimezone=UTC");
+            hikariConfigMap.put("dataSource.user", "root");
+            hikariConfigMap.put("dataSource.password", "1q2w3e4r");
+            connectionProvider = new HikariCPConnectionProvider(hikariConfigMap);
+
+            // 对数据库连接池进行初始化
+            connectionProvider.prepare();
+            jdbcClient = new JdbcClient(connectionProvider, 30);
+        }
+
+        Map<String, Integer> map = new HashMap<String, Integer>();
+
+        public void execute(Tuple input) {
+
+            String word = input.getStringByField("word");
+            Integer count = input.getIntegerByField("word_count");
+
+            // 查询操作
+            List<Column> list = new ArrayList<Column>();
+            list.add(new Column("word", Types.VARCHAR));
+            List<List<Column>> select = jdbcClient.select("select word from wc where word = ?", list);
+
+            Long n = select.stream().count();
+            System.out.println("Count of word '" + word + "' is: " + n);
+
+            if (n >= 1) {
+                // update
+                jdbcClient.executeSql("update wc set word_count = " + count + " where word = '" + word + "'");
+            } else {
+                // insert
+                jdbcClient.executeSql("insert into wc values ( '" + word + "', " + count + " )");
+            }
+        }
+
+        public void declareOutputFields(OutputFieldsDeclarer declarer) {
+
+        }
+
+        @Override
+        public void cleanup() {
+            connectionProvider.cleanup();
+        }
+    }
+
 
     public static void main(String[] args) {
 
@@ -140,32 +199,11 @@ public class LocalWordCountJDBCStormTopology {
         builder.setBolt("SplitBolt", new SplitBolt()).shuffleGrouping("DataSourceSpout");
         builder.setBolt("CountBolt", new CountBolt()).shuffleGrouping("SplitBolt");
 
-        // JdbcInsertBolt的相关配置
-        Map<String, Object> hikariConfigMap = Maps.newHashMap();
-//        hikariConfigMap.put("dataSourceClassName", "com.mysql.jdbc.jdbc2.optional.MysqlDataSource");
-        hikariConfigMap.put("dataSourceClassName", "com.mysql.cj.jdbc.MysqlDataSource");
-        hikariConfigMap.put("dataSource.url", "jdbc:mysql://localhost/storm?useUnicode=true&useSSL=false&characterEncoding=UTF-8&serverTimezone=UTC");
-        hikariConfigMap.put("dataSource.user", "root");
-        hikariConfigMap.put("dataSource.password", "1q2w3e4r");
-        ConnectionProvider connectionProvider = new HikariCPConnectionProvider(hikariConfigMap);
-
-        String tableName = "wc";
-        JdbcMapper simpleJdbcMapper = new SimpleJdbcMapper(tableName, connectionProvider);
-
-        JdbcInsertBolt userPersistanceBolt = new JdbcInsertBolt(connectionProvider, simpleJdbcMapper)
-                .withTableName(tableName)
-                .withQueryTimeoutSecs(30);
-
-        /*JdbcInsertBolt userPersistanceBolt = new JdbcInsertBolt(connectionProvider, simpleJdbcMapper)
-                .withInsertQuery("insert into wc values (?,?)")
-                .withQueryTimeoutSecs(30);*/
-
-        builder.setBolt("JdbcInsertBolt", userPersistanceBolt).shuffleGrouping("CountBolt");
-
+        builder.setBolt("JdbcUpdateBolt", new JdbcUpdateBolt()).shuffleGrouping("CountBolt");
 
         // 创建本地集群
         LocalCluster cluster = new LocalCluster();
-        cluster.submitTopology("LocalWordCountJDBCStormTopology", new Config(), builder.createTopology());
+        cluster.submitTopology("LocalWordCountJDBCUpdateStormTopology", new Config(), builder.createTopology());
 
     }
 

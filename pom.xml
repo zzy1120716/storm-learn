@@ -101,5 +101,11 @@
       <artifactId>guava</artifactId>
       <version>16.0.1</version>
     </dependency>
+
+    <dependency>
+      <groupId>org.apache.storm</groupId>
+      <artifactId>storm-kafka</artifactId>
+      <version>${storm.version}</version>
+    </dependency>
   </dependencies>
 </project>
